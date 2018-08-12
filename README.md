@@ -194,3 +194,120 @@ docker stop reddit && docker rm reddit
 docker run --name reddit --rm -it <your-login>/otus-reddit:1.0 bash
   ls / 
 ```
+
+## Docker 3
+
+Подключаемся 
+```
+docker-machine ls
+eval $(docker-machine env docker-host)
+```
+Подготавливаем архив
+Создаем файл `./post-py/Dockerfile`
+Оптимизируем структуру, меняем ADD на COPY
+```
+FROM python:3.6.0-alpine
+ENV POST_DATABASE_HOST post_db
+ENV POST_DATABASE posts
+WORKDIR /app
+COPY . /app
+RUN pip install -r /app/requirements.txt
+ENTRYPOINT ["python3", "post_app.py"]
+```
+
+Создаем файл `./comment/Dockerfile`
+Оптимизируем структуру, меняем ADD на COPY
+```
+FROM ruby:2.2
+RUN apt-get update -qq && apt-get install -y build-essential
+ENV APP_HOME /app
+ENV COMMENT_DATABASE_HOST comment_db
+ENV COMMENT_DATABASE comments
+RUN mkdir $APP_HOME
+WORKDIR $APP_HOME
+COPY . $APP_HOME/
+RUN bundle install
+CMD ["puma"]
+```
+Создаем файл `./ui/Dockerfile`
+Оптимизируем структуру, меняем ADD на COPY
+```
+FROM ruby:2.2
+RUN apt-get update -qq && apt-get install -y build-essential
+ENV APP_HOME /app
+ENV POST_SERVICE_HOST post
+ENV POST_SERVICE_PORT 5000
+ENV COMMENT_SERVICE_HOST comment
+ENV COMMENT_SERVICE_PORT 9292
+RUN mkdir $APP_HOME
+WORKDIR $APP_HOME
+COPY . $APP_HOME
+RUN bundle install
+CMD ["puma"]
+```
+Для сборки и запуска создаем `build.sh`
+```
+docker pull mongo:latest
+docker build -t kumite/post:1.0 ./post-py
+docker build -t kumite/comment:1.0 ./comment
+docker build -t kumite/ui:1.0 ./ui
+docker network create reddit
+docker run -d --network=reddit --network-alias=post_db --network-alias=comment_db mongo:latest
+docker run -d --network=reddit --network-alias=post kumite/post:1.0
+docker run -d --network=reddit --network-alias=comment kumite/comment:1.0
+docker run -d --network=reddit -p 9292:9292 kumite/ui:1.0
+```
+Сборка началась не с 1 шага, потому-что образ `ruby:2.2` уже в кеше
+Меняем `./ui/Dockerfile`
+```
+FROM ubuntu:16.04
+RUN apt-get update \
+    && apt-get install -y ruby-full ruby-dev build-essential \
+    && gem install bundler --no-ri --no-rdoc
+ENV APP_HOME /app
+RUN mkdir $APP_HOME
+WORKDIR $APP_HOME
+ADD Gemfile* $APP_HOME/
+RUN bundle install
+ADD . $APP_HOME
+ENV POST_SERVICE_HOST post
+ENV POST_SERVICE_PORT 5000
+ENV COMMENT_SERVICE_HOST comment
+ENV COMMENT_SERVICE_PORT 9292
+CMD ["puma"]
+```
+
+### Задание *
+
+Ортимизируем `ui/Docker` для этого испольpуем образ `ruby:2.2-alpine` чистим кэш после установки пакетов, убираем лишние вызовы
+```
+FROM ruby:2.2-alpine
+RUN apk update \
+    &&apk add  build-base  \
+    && rm -rf /var/cache/apk/
+ENV POST_SERVICE_HOST post
+ENV POST_SERVICE_PORT 5000
+ENV COMMENT_SERVICE_HOST comment
+ENV COMMENT_SERVICE_PORT 9292
+ENV APP_HOME /app
+RUN mkdir $APP_HOME
+WORKDIR $APP_HOME
+COPY . $APP_HOME
+RUN bundle install
+CMD ["puma"]
+```
+
+Результат
+```
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+kumite/ui           2.0                 9d7b3ff5bc91        22 seconds ago      301MB
+kumite/ui           1.0                 7b519c32219e        7 minutes ago       460MB
+```
+Создадим docker volume `docker volume create reddit_db`
+Изменим команду запуска для монго
+```
+docker run -d --network=reddit --network-alias=comment_db \
+  --network-alias=comment_db \
+  -v reddit_db:/data/db mongo:latest
+```
+Перезапусим контейнеры
