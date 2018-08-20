@@ -1,0 +1,29 @@
+- name: Create instance(s)
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+
+  vars:
+    service_account_email: 996655181957-compute@developer.gserviceaccount.com
+    credentials_file: ~/docker-6c2c2d07bdcf.json
+    project_id: docker-212817
+    machine_type: n1-standard-1
+    image: ubuntu-1604-xenial-v20180814
+    zone: europe-west3-b
+    tags: http-server,https-server
+    persistent_boot_disk: true
+    disk_size: 100
+
+  tasks:
+   - name: Launch instances gitlab-ci
+     gce:
+         instance_names: gitlab-ci
+         machine_type: "{{ machine_type }}"
+         image: "{{ image }}"
+         service_account_email: "{{ service_account_email }}"
+         credentials_file: "{{ credentials_file }}"
+         project_id: "{{ project_id }}"
+         zone: "{{ zone }}"
+         tags: "{{ tags }}"
+         persistent_boot_disk: "{{ persistent_boot_disk }}"
+         disk_size: "{{ disk_size }}"
