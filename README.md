@@ -815,3 +815,59 @@ end
 ### Интеграция со Slack
 
 Ссылка `https://devops-team-otus.slack.com/messages/CB6DFJYM7`
+
+## Gitlub-CI 2
+
+Создаем новый проект
+Добавим новый remote
+```
+git checkout -b gitlab-ci-2
+git remote add gitlab2 http://35.198.164.239/homework/example2.git
+git push gitlab2 gitlab-ci-2
+```
+Включаем runner
+Переименуем deploy stage в review
+deploy_job меняем на deploy_dev_job
+Добавляем environment
+```
+stages:
+  - build
+  - test
+  - review
+deploy_dev_job:
+  stage: review
+  script:
+    - echo 'Deploy'
+  environment:
+    name: dev
+    url: http://dev.example.com
+```
+Добавляем `when: manual` для ручного запуска в `staging` и `production`
+Добавляем директиву `only` для `staging` и `production`, чтобы job мог запуститься только с тегом версии. Например `2.4.10`
+```
+only:
+  - /^\d+\.\d+\.\d+/
+```
+Изменение без указания тэга запустят пайплайн без `job staging и production`
+Изменение, помеченное тэгом в git запустит полный пайплайн
+```
+git commit -a -m ‘#4 add logout button to profile page’
+git tag 2.4.10
+git push gitlab2 gitlab-ci-2 --tags
+```
+Создаем динамические окуружения
+Этот `job` определяет динамическое окружение для каждой ветки в репозитории, кроме ветки `master`
+```
+branch review:
+  stage: review
+  script: echo "Deploy to $CI_ENVIRONMENT_SLUG"
+  environment:
+    name: branch/$CI_COMMIT_REF_NAME
+    url: http://$CI_ENVIRONMENT_SLUG.example.com
+  only:
+    - branches
+  except:
+    - master
+```
+
+
