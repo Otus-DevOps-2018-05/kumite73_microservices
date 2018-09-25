@@ -71,3 +71,126 @@ mkdir docker-monolith
 cd docker-monolith
 docker images > docker-1.log
 ```
+
+## Docker 2
+
+Создал проект `docker`
+Инициализировал `gcloud init`
+Создал сервсиный ключ и задал в переменной `export GOOGLE_APPLICATION_CREDENTIALS=/home/user/docker-1111111111.json`
+```
+docker-machine create --driver google \
+  --google-machine-image https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/family/ubuntu-1604-lts \
+  --google-machine-type n1-standard-1 \
+  --google-zone europe-west1-b \
+  --google-project docker-111111 \
+  docker-host
+
+docker-machine ls
+NAME          ACTIVE   DRIVER   STATE     URL                       SWARM   DOCKER        ERRORS
+docker-host   *        google   Running   tcp://35.195.1.217:2376           v18.06.0-ce  
+
+eval $(docker-machine env docker-host)
+```
+
+`docker run --rm -ti tehbilly/htop` видим 1 процесс с PID 1 запущенный от root
+
+`docker run --rm --pid host -ti tehbilly/htop` видны все процессы хоста
+
+mongod.conf
+```
+# Where and how to store data.
+storage:
+  dbPath: /var/lib/mongodb
+    journal:
+    enabled: true
+# where to write logging data.
+systemLog:
+  destination: file
+  logAppend: true
+path: /var/log/mongodb/mongod.log
+# network interfaces
+net:
+  port: 27017
+  bindIp: 127.0.0.1
+```
+
+db_config
+```
+DATABASE_URL=127.0.0.1
+```
+
+start.sh
+```
+#!/bin/bash
+
+/usr/bin/mongod --fork --logpath /var/log/mongod.log --config /etc/mongodb.conf
+
+source /reddit/db_config
+
+cd /reddit && puma || exit
+```
+
+Dockerfile
+```
+FROM ubuntu:16.04
+
+RUN apt-get update
+RUN apt-get install -y mongodb-server ruby-full ruby-dev build-essential git
+RUN gem install bundler
+RUN git clone -b monolith https://github.com/express42/reddit.git
+
+COPY mongod.conf /etc/mongod.conf
+COPY db_config /reddit/db_config
+COPY start.sh /start.sh
+
+RUN cd /reddit && bundle install
+RUN chmod 0777 /start.sh
+
+CMD ["/start.sh"]
+```
+
+Выполняем `docker build -t reddit:latest .`
+Смотрим все образы `docker images -a`
+Запускаем контейнер `docker run --name reddit -d --network=host reddit:latest`
+Проверяем результат `docker-machine ls`
+```
+NAME          ACTIVE   DRIVER   STATE     URL                       SWARM   DOCKER        ERRORS
+docker-host   *        google   Running   tcp://35.195.1.217:2376           v18.06.0-ce
+```
+Разрешаем входящий триафик для 9292
+```
+gcloud compute firewall-rules create reddit-app \
+  --allow tcp:9292 \
+  --target-tags=docker-machine \
+  --description="Allow PUMA connections" \
+  --direction=INGRESS
+```
+Заходим в учетную запись DockerHub `docker login`
+
+Устанавливаем тег `docker tag reddit:latest kumite/otus-reddit:1.0`
+Загружаем образ в DockerHub `docker push kumite/otus-reddit:1.0`
+Выполняем на другой машине `docker run --name reddit -d -p 9292:9292 kumite/otus-reddit:1.0`
+Проверки
+```
+docker logs reddit -f
+docker exec -it reddit bash
+   ps aux 
+   killall5 1
+docker start reddit
+docker stop reddit && docker rm reddit
+docker run --name reddit --rm -it kumite/otus-reddit:1.0 bash
+  ps aux
+  exit
+docker inspect kumite/otus-reddit:1.0
+docker inspect kumite/otus-reddit:1.0 -f '{{.ContainerConfig.Cmd}}'
+docker run --name reddit -d -p 9292:9292 <your-login>/otus-reddit:1.0
+docker exec -it reddit bash
+  mkdir /test1234
+  touch /test1234/testfile
+  rmdir /opt
+  exit
+docker diff reddit
+docker stop reddit && docker rm reddit
+docker run --name reddit --rm -it <your-login>/otus-reddit:1.0 bash
+  ls / 
+```
