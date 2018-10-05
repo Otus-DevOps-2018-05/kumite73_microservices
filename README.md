@@ -311,3 +311,233 @@ docker run -d --network=reddit --network-alias=comment_db \
   -v reddit_db:/data/db mongo:latest
 ```
 Перезапусим контейнеры
+
+
+## Docker 4
+Подключаемся к докер машине
+```
+docker-machine ls
+eval $(docker-machine env docker-host)
+```
+Выполняем `docker run --network none --rm -d --name net_test joffotron/docker-net-tools -c "sleep 100"`
+Проверяем `docker exec -ti net_test ifconfig`
+Запускаем контейнер в сетевом пространстве docker-хоста `docker run --network host --rm -d --name net_test joffotron/docker-net-tools -c "sleep 100"`
+Сравниваем выводы команд:
+```
+docker exec -ti net_test ifconfig
+docker-machine ssh docker-host ifconfig
+```
+Они одинаковые, разница только в трафике.
+Выполняем 4 раза
+```
+docker run --network host -d nginx
+docker run --network host -d nginx
+docker run --network host -d nginx
+docker run --network host -d nginx
+```
+Запущен первый котенйер, остальные закрываются, так-как 80 порт хостовой системы заянт первым.
+На docker-host машине выполняем `sudo ln -s /var/run/docker/netns /var/run/netns`
+Смотрим `net-namespaces` с помощью команды `sudo ip netns`
+Создаем bridge-сеть в docker `docker network create reddit --driver bridge`
+Запускаем приложение с использованием сети  `reddit`
+```
+docker run -d --network=reddit mongo:latest
+docker run -d --network=reddit kumite/post:1.0
+docker run -d --network=reddit kumite/comment:1.0
+docker run -d --network=reddit -p 9292:9292 kumite/ui:1.0
+```
+Остановим старые копии контейнеров `docker kill $(docker ps -q)`
+```
+docker run -d --network=reddit --network-alias=post_db --network-alias=comment_db mongo:latest
+docker run -d --network=reddit --network-alias=post kumite/post:1.0
+docker run -d --network=reddit --network-alias=comment kumite/comment:1.0
+docker run -d --network=reddit -p 9292:9292 kumite/ui:1.0
+```
+Остановим старые копии контейнеров `docker kill $(docker ps -q)`
+Создаем docker-сети
+```
+docker network create back_net --subnet=10.0.2.0/24
+docker network create front_net --subnet=10.0.1.0/24
+```
+Разбиваем контейнеры по сетям
+```
+docker run -d --network=back_net --name mongo_db --network-alias=comment_db --network-alias=post_db mongo:latest
+docker run -d --network=back_net --name post kumite/post:1.0
+docker run -d --network=back_net --name comment kumite/comment:1.0
+docker run -d --network=front_net -p 9292:9292 --name ui kumite/ui:1.0
+```
+Подключим контейнеры ко второй сети
+```
+docker network connect front_net post
+docker network connect front_net comment
+```
+Заходим на машину `docker-machine ssh docker-host`
+Ставим пакет `bridge-utils`
+```
+sudo apt-get update && sudo apt-get install bridge-utils
+```
+ID сетей созданных  в проекте `sudo docker network ls`
+```
+NETWORK ID          NAME                DRIVER              SCOPE
+246ba0e1e0d0        back_net            bridge              local
+51f29fab138c        front_net           bridge              local
+64138b78c525        reddit              bridge              local
+```
+
+```
+ifconfig | grep br
+br-246ba0e1e0d0 Link encap:Ethernet  HWaddr 02:42:86:f7:c3:9f
+br-51f29fab138c Link encap:Ethernet  HWaddr 02:42:35:58:81:9e
+br-64138b78c525 Link encap:Ethernet  HWaddr 02:42:1f:3a:8d:56
+```
+
+Информация
+```
+brctl show br-246ba0e1e0d0
+bridge name     bridge id                   STP enabled interfaces
+br-246ba0e1e0d0         8000.024286f7c39f       no      veth55cacfd
+                                                        veth8ee4979
+                                                        vethe8a9750
+```
+
+Смотрим информацию `sudo iptables -nL -t nat`
+```
+Chain POSTROUTING (policy ACCEPT)
+target     prot opt source               destination
+MASQUERADE  all  --  10.0.1.0/24          0.0.0.0/0
+MASQUERADE  all  --  10.0.2.0/24          0.0.0.0/0
+MASQUERADE  all  --  172.18.0.0/16        0.0.0.0/0
+MASQUERADE  all  --  172.17.0.0/16        0.0.0.0/0
+MASQUERADE  tcp  --  10.0.1.2             10.0.1.2             tcp dpt:9292
+```
+
+Выполняем `ps ax | grep docker-proxy`
+```
+21218 ?        Sl     0:00 /usr/bin/docker-proxy -proto tcp -host-ip 0.0.0.0 -host-port 9292 -container-ip 10.0.1.2 -container-port 9292
+22245 pts/0    S+     0:00 grep --color=auto docker-proxy
+```
+### Docker-compose
+
+Устанавливаем `docker-compose`
+Создаем `docker-compose.yml`
+```
+version: '3.3'
+services:
+  post_db:
+    image: mongo:3.2
+    volumes:
+      - post_db:/data/db
+    networks:
+      - reddit
+  ui:
+    build: ./ui
+    image: ${USERNAME}/ui:1.0
+    ports:
+      - 9292:9292/tcp
+    networks:
+      - reddit
+  post:
+    build: ./post-py
+    image: ${USERNAME}/post:1.0
+    networks:
+      - reddit
+  comment:
+    build: ./comment
+    image: ${USERNAME}/comment:1.0
+    networks:
+      - reddit
+volumes:
+  post_db:
+networks:
+  reddit:
+```
+
+Создаем `.env`
+```
+USERNAME=kumite
+```
+
+Выполняем 
+```
+docker kill $(docker ps -q)
+docker-compose up -d
+docker-compose ps
+    Name                  Command             State           Ports
+src_comment_1   puma                          Up
+src_post_1      python3 post_app.py           Up
+src_post_db_1   docker-entrypoint.sh mongod   Up      27017/tcp
+src_ui_1        puma                          Up      0.0.0.0:9292->9292/tcp
+```
+
+Изменяем `docker-compose.yml`
+```
+version: '3.3'
+services:
+  post_db:
+    image: mongo:3.2
+    volumes:
+      - post_db:/data/db
+    networks:
+      back_net:
+        aliases:
+          - comment_db
+          - post_db
+  ui:
+    build: ./ui
+    image: ${USERNAME}/ui:${VERSION}
+    ports:
+      - ${PORT_UI}:${PORT_UI}/tcp
+    networks:
+      - front_net
+  post:
+    build: ./post-py
+    image: ${USERNAME}/post:${VERSION}
+    networks:
+      - front_net
+      - back_net
+  comment:
+    build: ./comment
+    image: ${USERNAME}/comment:${VERSION}
+    networks:
+      - front_net
+      - back_net
+volumes:
+  post_db:
+networks:
+  back_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+      -
+        subnet: 10.0.2.0/24
+     front_net: 
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+      -
+        subnet: 10.0.1.0/24
+```
+
+Переопределить базовое имя проекта можно задав пременную `export COMPOSE_PROJECT_NAME=GCP_KUMITE` или прописав в файл `.env`
+
+### Docker 4 *
+
+Создаем `docker-compose.override.yml`
+На машине где запущен docker демон должна быть папка /app с подпаками с исходным кодом для каждого приложения.
+```
+version: '3.3'
+services:
+  ui:
+    command: ["puma", "--debug", "-w", "2"]
+    volumes:
+      - /app/ui:/app
+  post:
+    volumes:
+      - /app/post-py:/app
+  comment:
+    command: ["puma", "--debug", "-w", "2"]
+    volumes:
+      - /app/comment:/app
+```
