@@ -3,6 +3,8 @@ FROM python:3.6.0-alpine
 ENV POST_DATABASE_HOST post_db
 ENV POST_DATABASE posts
 
+RUN apk add --no-cache gcc musl-dev
+
 WORKDIR /app
 COPY . /app
 
