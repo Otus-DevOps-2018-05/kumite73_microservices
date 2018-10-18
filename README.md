@@ -2797,3 +2797,427 @@ post-deployment-7f8b79b48-tbzvz      1/1     Running   0          28m
 ui-deployment-55cbbf797b-t8ps8       1/1     Running   0          28m
 ```
 
+## kubernetes-2
+
+### Minikube
+
+Установка
+```
+curl -Lo minikube https://storage.googleapis.com/minikube/releases/v0.27.0/minikube-linux-amd64 && chmod +x minikube && sudo mv minikube /usr/local/bin/
+```
+
+Запускаем Minukube-кластер.
+```
+minikube start
+```
+
+Провяzрем `kubectl get nodes`
+
+### Kubectl
+
+Текущий контекст `kubectl config current-context`
+
+Список всех контекстов `kubectl config get-contexts`
+
+### UI
+
+Меняем файл `kuberntetes/ui-deployment.yml`
+```
+---
+apiVersion: apps/v1beta2
+kind: Deployment
+metadata:
+  name: ui
+  labels:
+    app: reddit
+    component: ui
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: reddit
+      component: ui
+  template:
+    metadata:
+      name: ui-pod
+      labels:
+        app: reddit
+        component: ui
+    spec:
+      containers:
+      - image: kumite/ui
+        name: ui
+```
+
+Запускаем в Minikube ui-компоненту.
+```
+kubectl apply -f ui-deployment.yml
+```
+
+Проверка `kubectl get deployment`
+```
+NAME   DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+ui     3         3         3            3           41s
+```
+
+Найдем, используя selector, POD-ы приложения
+```
+kubectl get pods --selector component=ui
+```
+
+Пробрасываем порты
+```
+kubectl port-forward <pod-name> 8080:9292
+```
+
+Так-как у меня данный порт занят пробрасывал на 8899
+
+### Comment
+
+Меняем файл `kuberntetes/comment-deployment.yml`
+```
+---
+apiVersion: apps/v1beta2
+kind: Deployment
+metadata:
+  name: comment
+  labels:
+    app: reddit
+    component: comment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: reddit
+      component: comment
+  template:
+    metadata:
+      name: comment
+      labels:
+        app: reddit
+        component: comment
+    spec:
+      containers:
+      - image: kumite/comment
+        name: comment
+```
+
+Запуск и проверка
+```
+kubectl apply -f comment-deployment.yml
+kubectl get deployment
+kubectl get pods --selector component=comment
+kubectl port-forward comment-6d9887d946-888hv 8899:9292
+http://localhost:8899/healthcheck
+```
+
+### Post
+
+Меняем файл `kuberntetes/post-deployment.yml`
+```
+---
+apiVersion: apps/v1beta2
+kind: Deployment
+metadata:
+  name: post
+  labels:
+    app: reddit
+    component: post
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: reddit
+      component: post
+  template:
+    metadata:
+      name: post
+      labels:
+        app: reddit
+        component: post
+    spec:
+      containers:
+      - image: kumite/post
+        name: post
+```
+
+Запуск и проверка
+```
+kubectl apply -f post-deployment.yml
+kubectl get deployment
+kubectl get pods --selector component=post
+kubectl port-forward post-bb9958b84-9m8q6 8899:5000
+http://localhost:8899/healthcheck
+```
+
+### MongoDB
+Меняем файл `kuberntetes/mongo-deployment.yml`
+```
+---
+apiVersion: apps/v1beta2
+kind: Deployment
+metadata:
+  name: mongo
+  labels:
+    app: reddit
+    component: mongo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reddit
+      component: mongo
+  template:
+    metadata:
+      name: mongo
+      labels:
+        app: reddit
+        component: mongo
+    spec:
+      containers:
+      - image: mongo:3.2
+        name: mongo
+```
+
+примонтируем стандартный Volume для хранения данных вне контейнера
+```
+        volumeMounts:
+        - name: mongo-persistent-storage
+          mountPath: /data/db
+      volumes:
+      - name: mongo-persistent-storage
+        emptyDir: {}
+```
+
+### Services
+
+Для связи ui с post и comment нужно создать им по объекту Service. 
+`comment-service.yml`
+```
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comment
+  labels:
+    app: reddit
+    component: comment
+spec:
+  ports:
+  - port: 9292
+    protocol: TCP
+    targetPort: 9292
+  selector:
+    app: reddit
+    component: comment
+```
+
+`post-service.yml`
+```
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: post
+  labels:
+    app: reddit
+    component: post
+spec:
+  ports:
+  - port: 5000
+    protocol: TCP
+    targetPort: 5000
+  selector:
+    app: reddit
+    component: post
+```
+
+`mongodb-service.yml`
+```
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  labels:
+    app: reddit
+    component: mongo
+spec:
+  ports:
+  - port: 27017
+    protocol: TCP
+    targetPort: 27017
+  selector:
+    app: reddit
+    component: mongo
+```
+
+Сделаем Service для БД comment. `comment-mongodb-service.yml`
+```
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comment-db
+  labels:
+    app: reddit
+    component: mongo
+    comment-db: "true"
+spec:
+  ports:
+  - port: 27017
+    protocol: TCP
+    targetPort: 27017
+  selector:
+    app: reddit
+    component: mongo
+    comment-db: "true"
+```
+
+Добавляем новый тег в `mongo-deployment.yml`
+```
+comment-db: "true"
+```
+
+Задаем pod-ам `comment` переменную окружения для обращения к базе
+```
+        env:
+        - name: COMMENT_DATABASE_HOST
+          value: comment-db
+```
+
+Создаем `comment-mongodb-service.yml`
+```
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: post-db
+  labels:
+    app: reddit
+    component: mongo
+    post-db: "true"
+spec:
+  ports:
+  - port: 27017
+    protocol: TCP
+    targetPort: 27017
+  selector:
+    app: reddit
+    component: mongo
+    post-db: "true"
+```
+
+Добавляем новый тег в `mongo-deployment.yml`
+```
+post-db: "true"
+```
+
+Добавляем переменные окружения в `post-deployment.yml`
+```
+        env:
+        - name: POST_DATABASE_HOST
+          value: post-db
+```
+
+Применяем конфигурацию, форвардим порт и проверяем.
+
+#### NodePort
+
+Создаем `ui-service.yml`
+```
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels:
+    app: reddit
+    component: ui
+spec:
+  type: NodePort
+  ports:
+  - nodePort: 32092
+    port: 9292
+    protocol: TCP
+    targetPort: 9292
+  selector:
+    app: reddit
+    component: ui
+```
+
+Проверяем работоспособность
+```
+ w3m http://$(minikube ip):32092
+```
+
+Смотрим на какие сервисы можно нодить из вне
+```
+minikube service list
+```
+
+### Minikube
+
+Получить список расширений: `minikube addons list`
+
+### Namespaces
+
+Объекты dashboard
+```
+kubectl get all -n kube-system --selector app=kubernetes-dashboard
+```
+
+Создаем Namespace dev `dev-namespace.yml`
+```
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+```
+
+Добавляем информацию об окружении внутрь контейнера UI
+```
+        env:
+        - name: ENV
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+```
+
+### Kubernetes
+
+Создаем кластер
+Подключаемся
+```
+gcloud container clusters get-credentials standard-cluster-1 --zone us-central1-a --project docker-212817
+```
+
+Создадим dev namespace
+```
+kubectl apply -f ./kubernetes/reddit/dev-namespace.yml
+```
+Задеплоим все компоненты приложения в namespace dev:
+```
+kubectl apply -f ./kubernetes/reddit/ -n dev
+```
+Создаем правило брнадмауэра, все экземпляры сети сеть 0.0.0.0/0 порты TCP:30000-32767
+
+Внешний IP-адрес любой ноды из кластера ExternalIP
+```
+kubectl get nodes -o wide
+```
+
+Ищем  порт публикации сервиса ui
+```
+kubectl describe service ui -n dev | grep NodePort
+```
+
+Заходим
+```
+http://35.238.113.177:30543/
+```
+Результат
+```
+Microservices Reddit in dev ui-75d98bbf9b-882c7 container
+```
