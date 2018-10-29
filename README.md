@@ -541,3 +541,277 @@ services:
     volumes:
       - /app/comment:/app
 ```
+
+## Gitlub-CI 1
+
+Создаем директорорию `gitlub-ci`
+Настриваем динамическйи инвентори для `ansible`
+
+`ansible.cfg`
+
+```
+[defaults]
+inventory = gce.py
+remote_user = appuser
+private_key_file = ~/.ssh/appuser
+host_key_checking = False
+retry_files_enabled = False
+host_key_checking = False
+retry_files_enabled = False
+#roles_path = ./roles
+#vault_password_file = vault.key
+
+[diff]
+always = True
+context = 5
+```
+
+`gce.py`
+
+Заполняем `gce.ini`
+```
+gce_service_account_email_address = 11111111111111-compute@developer.gserviceaccount.com
+gce_service_account_pem_file_path = ~/docker-1111111.json
+gce_project_id = docker-1111111
+gce_zone = europe-west3-b
+instance_tags = http-server,https-server
+
+```
+Создаем playbook для создания вм в GCE `create-vm-for-gitlub.yml`
+```
+- name: Create instance(s)
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  vars:
+    service_account_email: 11111111-compute@developer.gserviceaccount.com
+    credentials_file: ~/docker-11111111111.json
+    project_id: docker-212817
+    machine_type: n1-standard-1
+    image: ubuntu-1604-xenial-v20180814
+    zone: europe-west3-b
+    tags: http-server,https-server
+    persistent_boot_disk: true
+    disk_size: 100
+  tasks:
+   - name: Launch instances gitlab-ci
+     gce:
+         instance_names: gitlab-ci
+         machine_type: "{{ machine_type }}"
+         image: "{{ image }}"
+         service_account_email: "{{ service_account_email }}"
+         credentials_file: "{{ credentials_file }}"
+         project_id: "{{ project_id }}"
+         zone: "{{ zone }}"
+         tags: "{{ tags }}"
+         persistent_boot_disk: "{{ persistent_boot_disk }}"
+         disk_size: "{{ disk_size }}"
+```
+Запускаем создание машины  `ansible-playbook create-vm-for-gitlub.yml`
+
+Создаем playbook для настройки машины `prepare-vm.yml`
+```
+- hosts: all
+  tasks:
+  - name: Add Docker GPG key
+    become: true
+    apt_key: url=https://download.docker.com/linux/ubuntu/gpg
+  - name: Add Docker APT repository
+    become: true
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ansible_distribution_release}} stable
+  - name: Install list of packages
+    become: true
+    apt:
+      name: "{{ item }}"
+      state: installed
+      update_cache: yes
+    with_items:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - software-properties-common
+      - docker-ce
+      - docker-compose
+  - name: Create directory
+    become: true
+    file:
+      path: "{{ item }}"
+      state: directory
+    with_items:
+      - /srv/gitlab/config
+      - /srv/gitlab/data
+      - /srv/gitlab/logs
+  - name: Create docker-compose.yml
+    become: true
+    copy:
+      src: ~/kumite73_microservices/gitlab-ci/docker-compose.yml
+      dest: /srv/gitlab/docker-compose.yml
+  - name: Install docker-machine
+    become: true
+    shell: |
+      base=https://github.com/docker/machine/releases/download/v0.14.0 && \
+      curl -L $base/docker-machine-$(uname -s)-$(uname -m) >/tmp/docker-machine \
+      && sudo install /tmp/docker-machine /usr/local/bin/docker-machine
+    args:
+      executable: /bin/bash
+  - name: Create create-runners.sh
+    become: true
+    copy:
+      src: ~/kumite73_microservices/gitlab-ci/create-runners.sh
+      dest: /srv/gitlab/create-runners.sh
+      mode: 775
+```
+
+Создаем `docker-compose.yml`
+```
+web:
+  image: 'gitlab/gitlab-ce:latest'
+  restart: always
+  hostname: 'gitlab.example.com'
+  environment:
+    GITLAB_OMNIBUS_CONFIG: |
+      external_url 'http://35.198.110.108'
+  ports:
+    - '80:80'
+    - '443:443'
+    - '2222:22'
+  volumes:
+    - '/srv/gitlab/config:/etc/gitlab'
+    - '/srv/gitlab/logs:/var/log/gitlab'
+    - '/srv/gitlab/data:/var/opt/gitlab'
+```
+
+Для задания со свездочкой создаем `create-runners.sh`
+```
+docker exec -it gitlab-runner gitlab-runner register --non-interactive \
+    --url http://35.198.110.108/ \
+    --registration-token bmdgNrSZ4xZCzQqnxaU3 \
+    --tag-list linux,xenial,ubuntu,docker \
+    --executor "docker" \
+    --name "auto-init-runner" \
+    --docker-image "alpine:latest" \
+    --run-untagged \
+    --locked=false
+```
+Выполянем playbook `ansible-playbook prepare-vm.yml`
+На удаленном хосте выполняем 
+```
+sudo -i 
+cd /srv/gitlab
+docker-compose up -d
+```
+Заходим `http://35.198.110.108/`
+Меняем пароль
+Логинимся
+Выключаем регистрацию новых пользователей `Settings - Sign-Up restrictions - Sign-up enabled`
+Создаем группу `homework`
+Создаем внутри нее проект `example`
+Добавляем remote в kumite73_microservices
+```
+git checkout -b gitlab-ci-1
+git remote add gitlab http://35.198.110.108/homework/example.git
+git push gitlab gitlab-ci-1
+вводим логин и пароль которые регистрировали
+```
+Создаем `.gitlab-ci.yml`
+```
+stages:
+  - build
+  - test
+  - deploy
+build_job:
+  stage: build
+  script:
+    - echo 'Building'
+test_unit_job:
+  stage: test
+  script:
+    - echo 'Testing 1'
+test_integration_job:
+  stage: test
+  script:
+    - echo 'Testing 2'
+deploy_job:
+  stage: deploy
+  script:
+    - echo 'Deploy'
+```
+
+Коммитим изменения
+
+```
+git add .gitlab-ci.yml
+git commit -m "add pipeline definition"
+git push gitlab gitlab-ci-1
+```
+
+Пайплайн готов к запуску но находится в статусе pending / stuck так как у нас нет runner
+Получаем данные для создания runners `Settings - CI/CD - Runners - Setup a specific Runner manually` 
+Меняем значения в файле `create-runners.sh` и выполняем playbook `create-runners.sh`
+На удаленной машине выполним `/srv/gitlub/create-runners.sh`
+Pipeline отработал
+
+Добавим исходный код reddit в репозиторий
+```
+git clone https://github.com/express42/reddit.git && rm -rf ./reddit/.git
+git add reddit/
+git commit -m “Add reddit app”
+git push gitlab gitlab-ci-1
+```
+Изменим описание пайплайна в `.gitlab-ci.yml`
+```
+image: ruby:2.4.2
+stages:
+  - build
+  - test
+  - deploy
+variables:
+  DATABASE_URL: 'mongodb://mongo/user_posts'
+before_script:
+  - cd reddit
+  - bundle install
+build_job:
+  stage: build
+  script:
+    - echo 'Building'
+test_unit_job:
+  stage: test
+  services:
+    - mongo:latest
+  script:
+    - ruby simpletest.rb
+test_integration_job:
+  stage: test
+  script:
+    - echo 'Testing 2'
+deploy_job:
+  stage: deploy
+  script:
+    - echo 'Deploy'
+```
+
+Создадим файл для тестирования `simpletest.rb`
+```
+require_relative './app'
+require 'test/unit'
+require 'rack/test'
+set :environment, :test
+class MyAppTest < Test::Unit::TestCase
+  include Rack::Test::Methods
+  def app
+    Sinatra::Application
+  end
+  def test_get_request
+    get '/'
+    assert last_response.ok?
+  end
+end
+```
+Добавим в `Gemfile` гем для тестирования `gem 'rack-test'`
+Закоммитим изменения
+Тесты прошли
+
+### Интеграция со Slack
+
+Ссылка `https://devops-team-otus.slack.com/messages/CB6DFJYM7`
