@@ -870,4 +870,169 @@ branch review:
     - master
 ```
 
+## Monitoring-1
+
+Создадим правило фаервола для Prometheus и Puma
+```
+gcloud compute firewall-rules create prometheus-default --allow tcp:9090
+gcloud compute firewall-rules create puma-default --allow tcp:9292
+```
+Создадим Docker хост в GCE и настроим локальное окружение на работу с ним
+```
+export GOOGLE_PROJECT=docker-212817
+docker-machine create --driver google \
+  --google-machine-image https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/family/ubuntu-1604-lts \
+  --google-machine-type n1-standard-1 \
+  --google-zone europe-west1-b \
+  docker-host
+eval $(docker-machine env docker-host)  
+```
+Запуск `Prometheus`
+```
+docker run --rm -p 9090:9090 -d --name prometheus prom/prometheus:v2.1.0
+```
+Узнаем IP машины `docker-machine ip docker-host`
+Переходим в web интерфейс `http://35.241.253.244:9090/graph`
+Выполним метрику `prometheus_build_info`
+```
+prometheus_build_info{branch="HEAD",goversion="go1.9.2",instance="localhost:9090",job="prometheus",revision="85f23d82a045d103ea7f3c89a91fba4a93e6367a",version="2.1.0"}
+```
+`Название метрики` - идентификатор собранной информации.
+`Лейбл` - добавляет метаданных метрике, уточняет ее. Использование лейблов дает нам возможность не ограничиваться лишь одним названием метрик для идентификации получаемой информации. Лейблы содержаться в {} скобках и представлены наборами "ключ=значение".
+`Значение метрики` - численное значение метрики, либо NaN, если значение недоступно
+
+`Targets (цели)` - представляют собой системы или процессы, за которыми следит Prometheus.
+
+Информация, которую собирает Prometheus `http://35.241.253.244:9090/metrics`
+Остановим контейнер  `docker stop prometheus`
+Создаем директорию `monitoring/prometheus`
+Создаем `Dockerfile`
+```
+FROM prom/prometheus:v2.1.0
+ADD prometheus.yml /etc/prometheus/
+```
+Создаем `prometheus.yml`
+```
+global:
+  scrape_interval: '5s'
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets:
+        - 'localhost:9090'
+  - job_name: 'ui'
+    static_configs:
+      - targets:
+        - 'ui:9292'
+  - job_name: 'comment'
+    static_configs:
+      - targets:
+        - 'comment:9292'
+```
+Создаем образ
+```
+export USER_NAME=kumite
+docker build -t $USER_NAME/prometheus .
+```
+Собираем `images`
+```
+/src/ui $ bash docker_build.sh
+/src/post-py $ bash docker_build.sh
+/src/comment $ bash docker_build.sh
+```
+Или из корня
+```
+for i in ui post-py comment; do cd src/$i; bash docker_build.sh; cd -; done
+```
+Меняем `docker/docker-compose.yml`
+```
+  prometheus:
+    image: ${USERNAME}/prometheus
+    ports:
+      - '9090:9090'
+    volumes:
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention=1d'
+volumes:
+  prometheus_data:
+```
+Добавляем `networks` для `prometheus`
+```
+networks:
+  - front_net
+  - back_net
+```
+Поднимаем инфраструктуру `docker-compose up -d`
+Проверяем состояние сервисов `http://35.241.253.244:9090/targets`
+Состояние сервиса UI - всегда выдавалось с ошибкой. После выяснения прчин, было выяснено, что в коде Dockerfile для сервиса комментариев стояла `comment_db` 
+Создаем базу для комментов
+```
+  comment_db:
+    image: mongo:3.2
+    volumes:
+      - comment_db:/data/db
+    networks:
+      - back_net
+```
+Заново поднимаем инфраструктуру. Теперь `ui_health` возвращает `1`
+Остановим post сервис `docker-compose stop post`
+Метрика изменила свое значение на 0, что означает, что UI сервис стал нездоров
+`ui_health_post_availability` стал возвращать `0`
+Запустим `docker-compose start post`
+Post сервис поправился
+UI сервис тоже
+
+### Сбор метрик
+Добавляем в `docker-compose.yml`
+```
+  node-exporter:
+    image: prom/node-exporter:v0.15.2
+    user: root
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points="^/(sys|proc|dev|host|etc)($$|/)"'
+```
+Меняем `prometheus.yml`
+```
+- job_name: 'node'
+  static_configs:
+    - targets:
+      - 'node-exporter:9100'
+```
+Собираем контейнер `docker build -t $USER_NAME/prometheus .`
+Пересоздадим сервисы
+```
+docker-compose down
+docker-compose up -d
+```
+Данные с node не собираются, так-как контейнер не видит prometheus. Добавляем сети
+```
+networks:
+  - front_net
+  - back_net
+```
+Сейчас все работает
+Получим информацию об использовании CPU `node_load1`
+Проверим мониторинг
+Зайдем на хост: `docker-machine ssh docker-host`
+Добавим нагрузки: `yes > /dev/null`
+нагрузка выросла
+Запушим собранные образы на DockerHub
+```
+docker login
+docker push $USER_NAME/ui
+docker push $USER_NAME/comment
+docker push $USER_NAME/post
+docker push $USER_NAME/prometheus
+```
+
+Ссылка на DockerHub: `https://hub.docker.com/r/kumite/`
 
