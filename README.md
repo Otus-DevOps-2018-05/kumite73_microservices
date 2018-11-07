@@ -1036,3 +1036,197 @@ docker push $USER_NAME/prometheus
 
 Ссылка на DockerHub: `https://hub.docker.com/r/kumite/`
 
+## monitoring-2
+
+Создадим Docker хост в GCE и настроим локальное окружение на работу с ним
+```
+export GOOGLE_PROJECT=docker-1111111
+# Создать докер хост
+docker-machine create --driver google \
+    --google-machine-image https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/family/ubuntu-1604-lts \
+    --google-machine-type n1-standard-1 \
+    --google-zone europe-west1-b \
+    docker-host
+# Настроить докер клиент на удаленный докер демон
+eval $(docker-machine env docker-host)
+docker-machine ip docker-host
+```
+IP: 35.240.24.254
+
+Вернуть на локальную машину после ДЗ
+```
+# Переключение на локальный докер
+eval $(docker-machine env --unset)
+docker-machine rm docker-host
+```
+
+Разделим файлы `Docker compose`
+Для запуска приложений будем использовать `docker-compose up -d`
+Для мониторинга `docker-compose -f docker-compose-monitoring.yml up -d`
+
+### cAdvisor
+
+Добавляем запуск контейнера в `docker-compose-monitoring.yml`
+```
+cadvisor:
+  image: google/cadvisor:v0.29.0
+  volumes:
+    - '/:/rootfs:ro'
+    - '/var/run:/var/run:rw'
+    - '/sys:/sys:ro'
+    - '/var/lib/docker/:/var/lib/docker:ro'
+  ports:
+    - '8080:8080'
+  networks:
+    - front-ner
+```
+
+Добавялем информацию о новом сервисе в Prometheus
+```
+scrape_configs:
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets:
+        - 'cadvisor:8080'
+```
+Пересоберем образ Prometheus с обновленной конфигурацией
+```
+export USER_NAME=kumite
+docker build -t $USER_NAME/prometheus .
+docker push kumite/prometheus
+```
+
+Запускаем сервисы
+```
+docker-compose up -d
+docker-compose -f docker-compose-monitoring.yml up -d
+```
+Создаем правило фаервола для 8080 порта `cadvisor` и добавляем тег в машину.
+Открываем страницу Web UI по адресу `http://http://35.240.24.254:8080`
+
+### Grafana
+Добавляем в `docker-compose-monitoring.yml`
+```
+  grafana:
+    image: grafana/grafana:5.0.0
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=secret
+    depends_on:
+      - prometheus
+    ports:
+      - 3000:3000
+    networks:
+      - front_net
+
+volumes:
+  grafana_data:
+```
+Запустим сервис `docker-compose -f docker-compose-monitoring.yml up -d grafana`
+Создаем правило фаервола для 3000 порта `grafana` и добавляем тег в машину.
+Открываем Web UI `http://http://35.240.24.254:3000`
+
+### Мониторинг работы приложения
+
+Добавим информацию о post сервисе в конфигурацию Prometheus
+```
+- job_name: 'post'
+  static_configs:
+    - targets:
+      - 'post:5000'
+```
+Пересоберем образ Prometheus с обновленной конфигурацией
+```
+docker build -t $USER_NAME/prometheus .
+docker push kumite/prometheus
+```
+
+### Alertmanager
+
+Создадим Dockerfile
+```
+FROM prom/alertmanager:v0.14.0
+ADD config.yml /etc/alertmanager/
+```
+Создаем `cinfig.yml`
+```
+global:
+  slack_api_url: 'https://hooks.slack.com/services/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'
+
+route:
+  receiver: 'slack-notifications'
+
+receivers:
+- name: 'slack-notifications'
+  slack_configs:
+  - channel: '#aleksei_kiselev'
+```
+Собираем образ `docker build -t $USER_NAME/alertmanager .`
+Заливаем на хаб `docker push $USER_NAME/alertmanager`
+Добавляем новый сервис в мониторинг
+```
+alertmanager:
+  image: ${USER_NAME}/alertmanager:latest
+  command:
+    - '--config.file=/etc/alertmanager/config.yml'
+  ports:
+    - 9093:9093
+  networks:
+    - front_net
+```
+### Alert rules
+
+Создадим файл `alerts.yml` в директории prometheus
+```
+groups:
+  - name: alert.rules
+    rules:
+    - alert: InstanceDown
+      expr: up == 0
+      for: 1m
+      labels:
+        severity: page
+      annotations:
+        description: '{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 1 minute'
+        summary: 'Instance {{ $labels.instance }} down'
+```
+Добавим операцию копирования данного файла в `monitoring/prometheus/Dockerfile`
+```
+FROM prom/prometheus:v2.1.0
+ADD prometheus.yml /etc/prometheus/
+ADD alerts.yml /etc/prometheus/
+```
+
+Добавим информацию о правилах, в конфиг `Prometheus`
+```
+rule_files:
+  - "alerts.yml"
+
+alerting:
+  alertmanagers:
+  - scheme: http
+    static_configs:
+    - targets:
+      - "alertmanager:9093"
+```
+
+Пересоберем 
+```
+docker build -t $USER_NAME/prometheus .
+docker push kumite/prometheus
+```
+Пересоздадим нашу Docker инфраструктуру мониторинга
+```
+docker-compose -f docker-compose-monitoring.yml down
+docker-compose -f docker-compose-monitoring.yml up -d
+```
+Остановим сервис `docker-compose stop post`
+```
+AlertManager APP [11:29 AM]
+[FIRING:1] InstanceDown (post:5000 post page)
+```
+
+Ссылка на Docker HUB `https://hub.docker.com/u/kumite/`
