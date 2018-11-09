@@ -1230,3 +1230,183 @@ AlertManager APP [11:29 AM]
 ```
 
 Ссылка на Docker HUB `https://hub.docker.com/u/kumite/`
+
+## logging-1
+
+Выполняем  сборку образов при помощи скриптов docker_build.sh в директории каждого сервиса:
+```
+/src/ui $ bash docker_build.sh && docker push $USER_NAME/ui
+/src/post-py $ bash docker_build.sh && docker push $USER_NAME/post
+/src/comment $ bash docker_build.sh && docker push $USER_NAME/comment
+```
+Или сразу все из корня репозитория:
+```
+for i in ui post-py comment; do cd src/$i; bash docker_build.sh; cd -; done
+```
+Подготовка окружения
+```
+docker-machine create --driver google \
+    --google-machine-image https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/family/ubuntu-1604-lts \
+    --google-machine-type n1-standard-1 \
+    --google-open-port 5601/tcp \
+    --google-open-port 9292/tcp \
+    --google-open-port 9411/tcp \
+    logging
+# configure local env
+eval $(docker-machine env logging)
+# узнаем IP адрес
+docker-machine ip logging
+```
+
+Создаем `docker/docker-compose-logging.yml`
+```
+version: '3'
+services:
+  fluentd:
+    image: ${USERNAME}/fluentd
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+
+  elasticsearch:
+    image: elasticsearch:6.4.2
+    environment:
+      - discovery.type=single-node
+    expose:
+      - 9200
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+
+  kibana:
+    image: kibana:6.4.2
+    ports:
+      - "5601:5601"
+```
+### Fluentd
+
+Создаем в проекте `microservices` директорию `logging/fluentd`
+Создаем `Dockerfile`
+```
+FROM fluent/fluentd:v0.12
+RUN gem install fluent-plugin-elasticsearch --no-rdoc --no-ri --version 1.9.5
+RUN gem install fluent-plugin-grok-parser --no-rdoc --no-ri --version 1.0.0
+ADD fluent.conf /fluentd/etc
+```
+Создаем `ogging/fluentd/fluent.conf`
+```
+<source>
+  @type forward
+  port 24224
+  bind 0.0.0.0
+</source>
+
+<match *.**>
+  @type copy
+  <store>
+    @type elasticsearch
+    host elasticsearch
+    port 9200
+    logstash_format true
+    logstash_prefix fluentd
+    logstash_dateformat %Y%m%d
+    include_tag_key true
+    type_name access_log
+    tag_key @log_name
+    flush_interval 1s
+  </store>
+  <store>
+    @type stdout
+  </store>
+</match>
+```
+Собираем образ `docker build -t $USER_NAME/fluentd .`
+Правим `.env` файл и меняем теги нашего приложения на `logging`
+Запускаем сервисы приложения `docker/ $ docker-compose up -d`
+Смотрим логи post сервиса: `docker/ $ docker-compose logs -f post`
+
+### Отправка логов во Fluentd
+
+Меняем `docker/docker-compose.yml`
+```
+  post:
+    image: ${USER_NAME}/post:${VERSION}
+    environment:
+      - POST_DATABASE_HOST=post_db
+      - POST_DATABASE=posts
+    depends_on:
+      - post_db
+    ports:
+      - "5000:5000"
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: service.post
+```
+Поднимем инфраструктуру централизованной системы логирования и перезапустим сервисы приложения Из каталога `docker`
+Необходимо проставить версию  `6.4.2` для кибана и эластик
+```
+docker-compose -f docker-compose-logging.yml up -d
+docker-compose down
+docker-compose up -d
+```
+Добавим фильтр парсинга `logging/fluentd/fluent.conf`
+```
+<filter service.post>
+  @type parser
+  format json
+  key_name log
+</filter>
+```
+Перерсоберм `docker build -t $USER_NAME/fluentd`
+Перезапустим `docker-compose -f docker-compose-logging.yml up -d fluentd`
+
+### Неструктурированные логи
+
+Логируем UI сервис
+```
+logging:
+  driver: "fluentd"
+  options:
+    fluentd-address: localhost:24224
+    tag: service.ui
+```
+Добавляем разбор неструкурированных логов `/docker/fluentd/fluent.conf`
+```
+<filter service.ui>
+  @type parser
+  format /\[(?<time>[^\]]*)\]  (?<level>\S+) (?<user>\S+)[\W]*service=(?<service>\S+)[\W]*event=(?<event>\S+)[\W]*(?:path=(?<path>\S+)[\W]*)?request_id=(?<request_id>\S+)[\W]*(?:remote_addr=(?<remote_addr>\S+)[\W]*)?(?:method= (?<method>\S+)[\W]*)?(?:response_status=(?<response_status>\S+)[\W]*)?(?:message='(?<message>[^\']*)[\W]*)?/
+  key_name log
+</filter>
+```
+
+Меняем парсинг на встроенный
+```
+<filter service.ui>
+  @type parser
+  key_name log
+  format grok
+  grok_pattern %{RUBY_LOGGER}
+</filter>
+<filter service.ui>
+  @type parser
+  format grok
+  grok_pattern service=%{WORD:service} \| event=%{WORD:event} \| request_id=%{GREEDYDATA:request_id} \| message='%{GREEDYDATA:message}'
+  key_name message
+  reserve_data true
+</filter>
+```
+
+### Заждание со *
+
+Добавляем `/docker/fluentd/fluent.conf`
+```
+<filter service.ui>
+  @type parser
+  format grok
+  grok_pattern service=%{WORD:service} \| event=%{WORD:event} \| path=%{GREEDYDATA:path} \| request_id=%{GREEDYDATA:request_id} \| remote_addr=%{GREEDYDATA:remote_addr} \| method=%{GREEDYDATA:method} \| response_status=%{WORD:response_status}
+  key_name message
+  reserve_data true
+</filter>
+```
