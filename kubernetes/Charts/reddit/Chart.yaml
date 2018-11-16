@@ -1,0 +1,6 @@
+name: reddit
+version: 0.1.0
+description: OTUS sample reddit application
+maintainers:
+  - name: Aleksei Kiselev
+    email: kumite73@gmail.com
